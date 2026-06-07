@@ -1,6 +1,6 @@
 {
   "name": "@chainvue/verusid-oauth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "TypeScript SDK for server-side VerusID OAuth/OIDC login",
   "license": "MIT",
   "author": "Robert Lech",

@@ -469,25 +469,41 @@ async function postForm(
   headers: Record<string, string> = {},
   config: Pick<VerusOAuthConfig, "timeoutMs"> = { timeoutMs: DEFAULT_TIMEOUT_MS },
 ): Promise<TokenResult> {
-  const response = await fetch(url, {
-    method: "POST",
-    headers: {
-      ...headers,
-      "content-type": "application/x-www-form-urlencoded",
-      accept: "application/json",
-    },
-    body,
-    signal: AbortSignal.timeout(config.timeoutMs || DEFAULT_TIMEOUT_MS),
-  })
-  const text = await response.text()
-  const parsed = parseJson(text) || { raw: text }
+  try {
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        ...headers,
+        "content-type": "application/x-www-form-urlencoded",
+        accept: "application/json",
+      },
+      body,
+      signal: AbortSignal.timeout(config.timeoutMs || DEFAULT_TIMEOUT_MS),
+    })
+    const text = await response.text()
+    const parsed = parseJson(text) || { raw: text }
 
-  return {
-    ok: response.ok,
-    status: response.status,
-    statusText: response.statusText,
-    body: parsed,
-    error: response.ok ? null : parsed.error || response.statusText,
+    return {
+      ok: response.ok,
+      status: response.status,
+      statusText: response.statusText,
+      body: parsed,
+      error: response.ok ? null : parsed.error || response.statusText,
+    }
+  } catch (error) {
+    const errorName = error instanceof Error ? error.name : "Error"
+    const requestError = errorName === "TimeoutError" || errorName === "AbortError"
+      ? "request_timeout"
+      : "request_failed"
+
+    return {
+      ok: false,
+      body: {
+        error: requestError,
+        error_description: "Token endpoint request failed before a response was received.",
+      },
+      error: errorName,
+    }
   }
 }
 
@@ -742,7 +758,7 @@ function redactDiagnostics(value: unknown): unknown {
   }
   const redacted: Record<string, unknown> = {}
   for (const [key, entry] of Object.entries(value)) {
-    if (/token|secret|authorization/i.test(key)) {
+    if (/^(access_token|id_token|refresh_token|client_secret|secret|authorization|token)$/i.test(key)) {
       redacted[key] = "[redacted]"
     } else {
       redacted[key] = redactDiagnostics(entry)

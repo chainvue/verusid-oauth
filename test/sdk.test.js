@@ -413,6 +413,35 @@ test("structured errors expose stable codes and redact token diagnostics", async
   }
 })
 
+test("token exchange transport failures expose stable codes without leaking diagnostics", async () => {
+  const originalFetch = global.fetch
+  global.fetch = async () => {
+    throw new Error("network failed with secret-access-token and secret-id-token")
+  }
+
+  try {
+    const client = createVerusOAuthClient(config)
+    await assert.rejects(
+      client.completeLogin({
+        code: "bad-code",
+        codeVerifier: "saved-code-verifier",
+        returnedState: "saved-state",
+        expectedState: "saved-state",
+        expectedNonce: "saved-nonce",
+      }),
+      (error) => {
+        assert.equal(error instanceof VerusOAuthError, true)
+        assert.equal(error.code, VerusOAuthErrorCode.TOKEN_EXCHANGE_FAILED)
+        assert.doesNotMatch(JSON.stringify(error.diagnostics), /secret-access-token|secret-id-token/)
+        assert.match(JSON.stringify(error.diagnostics), /request_failed/)
+        return true
+      },
+    )
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
 test("ID token verification checks signature, issuer, audience, nonce, expiry, and at_hash", async () => {
   clearOidcCache()
   const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
