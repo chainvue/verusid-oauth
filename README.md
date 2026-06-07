@@ -76,13 +76,23 @@ app.get("/callback", async (req, res, next) => {
 Raw OAuth tokens are returned only when `includeRawTokens: true` is passed to `completeLogin()`.
 SDK-created login requests use PKCE by default. Store `codeVerifier` in the
 user session with `state` and `nonce`, then pass it to `completeLogin()`.
+`completeLogin()` rejects SDK-created login callbacks that do not provide the
+saved verifier.
+
+Production deployments can provide `accessTokenVerifier` on the config to
+validate access tokens without exposing Hydra admin introspection to the app
+runtime. The verifier receives `{ accessToken, tokenSet, idTokenClaims, config }`
+and returns `{ active, claims }`; the returned Verus claims must still match the
+verified ID-token claims. Without a custom verifier, the SDK keeps using Hydra
+admin introspection.
 
 ## Production Guard
 
 Call `assertProductionConfig(config)` during production startup, or use
 `getProductionConfigErrors(config)` if you need to render/report all failures.
 The guard rejects local example secrets, HTTP redirect URIs, public-looking HTTP
-Hydra admin URLs, and starter-only local host defaults.
+Hydra admin URLs, non-HTTPS Hydra issuer URLs, invalid URLs, invalid numeric
+port/timeout values, non-default scopes, and starter-only local host defaults.
 
 ## Environment
 

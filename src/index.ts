@@ -45,11 +45,27 @@ export type VerusOAuthConfig = {
   sessionSecret: string
   showDebugTokens: boolean
   timeoutMs: number
+  accessTokenVerifier?: AccessTokenVerifier
 }
+
+export type AccessTokenVerifierInput = {
+  accessToken: string
+  tokenSet: JsonObject
+  idTokenClaims: JsonObject
+  config: VerusOAuthConfig
+}
+
+export type AccessTokenVerifierResult = {
+  active: boolean
+  claims?: Record<string, unknown>
+}
+
+export type AccessTokenVerifier =
+  (input: AccessTokenVerifierInput) => AccessTokenVerifierResult | Promise<AccessTokenVerifierResult>
 
 export type CompleteLoginOptions = {
   code?: unknown
-  codeVerifier?: unknown
+  codeVerifier: unknown
   returnedState?: unknown
   expectedState?: unknown
   expectedNonce?: unknown
@@ -84,6 +100,7 @@ export type VerifiedVerusSession = PublicVerusSession & {
 export const VerusOAuthErrorCode = Object.freeze({
   STATE_MISMATCH: "STATE_MISMATCH",
   MISSING_CODE: "MISSING_CODE",
+  MISSING_CODE_VERIFIER: "MISSING_CODE_VERIFIER",
   TOKEN_EXCHANGE_FAILED: "TOKEN_EXCHANGE_FAILED",
   ID_TOKEN_VERIFICATION_FAILED: "ID_TOKEN_VERIFICATION_FAILED",
   ACCESS_TOKEN_INTROSPECTION_FAILED: "ACCESS_TOKEN_INTROSPECTION_FAILED",
@@ -197,21 +214,43 @@ export function getConfigWarnings(config: Pick<VerusOAuthConfig, "localHost" | "
 }
 
 export function getProductionConfigErrors(
-  config: Pick<VerusOAuthConfig, "redirectUri" | "hydraAdminUrl" | "clientSecret" | "sessionSecret" | "localHost">,
+  config: Pick<VerusOAuthConfig, "port" | "redirectUri" | "hydraPublicUrl" | "hydraAdminUrl" | "clientSecret" | "sessionSecret" | "localHost" | "scope" | "timeoutMs">,
 ): string[] {
   const errors: string[] = []
 
-  if (isHttpUrl(config.redirectUri)) {
+  const redirectUri = parseUrl(config.redirectUri)
+  const hydraPublicUrl = parseUrl(config.hydraPublicUrl)
+  const hydraAdminUrl = parseUrl(config.hydraAdminUrl)
+
+  if (!isFinitePositiveInteger(config.port)) {
+    errors.push("Production PORT must be a finite positive integer.")
+  }
+  if (!isFinitePositiveInteger(config.timeoutMs)) {
+    errors.push("Production OAUTH_HTTP_TIMEOUT_MS must be a finite positive integer.")
+  }
+  if (!redirectUri) {
+    errors.push("Production REDIRECT_URI must be a valid URL.")
+  } else if (redirectUri.protocol !== "https:") {
     errors.push("Production REDIRECT_URI must use HTTPS.")
+  }
+  if (!hydraPublicUrl) {
+    errors.push("Production HYDRA_PUBLIC_URL must be a valid URL.")
+  } else if (hydraPublicUrl.protocol !== "https:") {
+    errors.push("Production HYDRA_PUBLIC_URL must use HTTPS.")
+  }
+  if (!hydraAdminUrl) {
+    errors.push("Production HYDRA_ADMIN_URL must be a valid URL.")
+  } else if (isPublicHttpParsedUrl(hydraAdminUrl)) {
+    errors.push("Production HYDRA_ADMIN_URL must not be a public-looking HTTP URL.")
+  }
+  if (config.scope !== DEFAULT_SCOPE) {
+    errors.push(`Production SCOPES must be exactly "${DEFAULT_SCOPE}" unless the application intentionally overrides the SDK default.`)
   }
   if (config.clientSecret === "verus-express-secret") {
     errors.push("Production CLIENT_SECRET must not use the bundled local example secret.")
   }
   if (config.sessionSecret === "local-express-login-session-secret") {
     errors.push("Production SESSION_SECRET must not use the bundled local example secret.")
-  }
-  if (isPublicHttpUrl(config.hydraAdminUrl)) {
-    errors.push("Production HYDRA_ADMIN_URL must not be a public-looking HTTP URL.")
   }
   if (config.localHost === LOCAL_HOST_PLACEHOLDER || config.localHost === COMPAT_LOCAL_HOST) {
     errors.push("Production LOCAL_HOST must not use the starter local compatibility default.")
@@ -251,7 +290,7 @@ export class VerusOAuthClient {
   }
 
   async completeLogin(
-    options: CompleteLoginOptions = {},
+    options: CompleteLoginOptions,
   ): Promise<PublicVerusSession | VerifiedVerusSession | null | undefined> {
     const {
       code,
@@ -269,8 +308,14 @@ export class VerusOAuthClient {
     if (!code) {
       throw new VerusOAuthError(VerusOAuthErrorCode.MISSING_CODE, "Hydra did not return an authorization code.")
     }
+    if (!codeVerifier) {
+      throw new VerusOAuthError(
+        VerusOAuthErrorCode.MISSING_CODE_VERIFIER,
+        "Missing saved PKCE code verifier. Store codeVerifier with state and nonce during /login and pass it to completeLogin().",
+      )
+    }
 
-    const tokenResult = await exchangeCode(this.config, String(code), codeVerifier ? String(codeVerifier) : undefined)
+    const tokenResult = await exchangeCode(this.config, String(code), String(codeVerifier))
     if (!tokenResult.ok) {
       throw new VerusOAuthError(
         VerusOAuthErrorCode.TOKEN_EXCHANGE_FAILED,
@@ -293,9 +338,7 @@ export class VerusOAuthClient {
       )
     }
 
-    const introspectionResult = tokenResult.body.access_token
-      ? await introspectAccessToken(this.config, String(tokenResult.body.access_token))
-      : null
+    const introspectionResult = await verifyAccessToken(this.config, tokenResult.body, idTokenVerification.claims)
     if (!introspectionResult?.body?.active) {
       throw new VerusOAuthError(
         VerusOAuthErrorCode.ACCESS_TOKEN_INTROSPECTION_FAILED,
@@ -390,6 +433,34 @@ export async function introspectAccessToken(config: VerusOAuthConfig, accessToke
     {},
     config,
   )
+}
+
+export async function verifyAccessToken(
+  config: VerusOAuthConfig,
+  tokenSet: JsonObject,
+  idTokenClaims: JsonObject | null,
+): Promise<IntrospectionResult | null> {
+  const accessToken = optionalStringValue(tokenSet.access_token)
+  if (!accessToken) {
+    return null
+  }
+
+  if (config.accessTokenVerifier) {
+    const result = await config.accessTokenVerifier({
+      accessToken,
+      tokenSet,
+      idTokenClaims: idTokenClaims || {},
+      config,
+    })
+    return {
+      body: {
+        active: Boolean(result.active),
+        ext: result.claims || {},
+      },
+    }
+  }
+
+  return introspectAccessToken(config, accessToken)
 }
 
 async function postForm(
@@ -684,25 +755,24 @@ function createPkceChallenge(codeVerifier: string): string {
   return crypto.createHash("sha256").update(codeVerifier).digest("base64url")
 }
 
-function isHttpUrl(value: string): boolean {
+function parseUrl(value: string): URL | null {
   try {
-    return new URL(value).protocol === "http:"
+    return new URL(value)
   } catch {
-    return false
+    return null
   }
 }
 
-function isPublicHttpUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === "http:" && !isLoopbackHost(url.hostname)
-  } catch {
-    return false
-  }
+function isPublicHttpParsedUrl(url: URL): boolean {
+  return url.protocol === "http:" && !isLoopbackHost(url.hostname)
 }
 
 function isLoopbackHost(hostname: string): boolean {
   return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]"
+}
+
+function isFinitePositiveInteger(value: number): boolean {
+  return Number.isInteger(value) && Number.isFinite(value) && value > 0
 }
 
 function stringValue(value: unknown): string {

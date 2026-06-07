@@ -15,6 +15,7 @@ import {
   toPublicSession,
   validateState,
   VerusOAuthError,
+  VerusOAuthErrorCode,
   verifyIdToken,
   verusClaimsMatch,
 } from "../dist/index.js"
@@ -93,18 +94,56 @@ test("production config errors reject local and public HTTP settings", () => {
   }))
   const publicAdminErrors = getProductionConfigErrors(createConfig({
     LOCAL_HOST: "app.example.com",
+    HYDRA_PUBLIC_URL: "https://hydra.example.com",
     HYDRA_ADMIN_URL: "http://hydra-admin.example.com:4445",
     CLIENT_SECRET: "production-client-secret",
     SESSION_SECRET: "production-session-secret",
     REDIRECT_URI: "https://app.example.com/callback",
   }))
+  const malformedErrors = getProductionConfigErrors({
+    ...createConfig({
+      LOCAL_HOST: "app.example.com",
+      HYDRA_PUBLIC_URL: "not a url",
+      HYDRA_ADMIN_URL: "also not a url",
+      REDIRECT_URI: "not a url",
+      CLIENT_SECRET: "production-client-secret",
+      SESSION_SECRET: "production-session-secret",
+    }),
+    port: Number.NaN,
+    timeoutMs: 0,
+  })
+  const insecureIssuerErrors = getProductionConfigErrors(createConfig({
+    LOCAL_HOST: "app.example.com",
+    HYDRA_PUBLIC_URL: "http://hydra.example.com",
+    HYDRA_ADMIN_URL: "http://127.0.0.1:4445",
+    CLIENT_SECRET: "production-client-secret",
+    SESSION_SECRET: "production-session-secret",
+    REDIRECT_URI: "https://app.example.com/callback",
+  }))
+  const scopeErrors = getProductionConfigErrors(createConfig({
+    LOCAL_HOST: "app.example.com",
+    HYDRA_PUBLIC_URL: "https://hydra.example.com",
+    HYDRA_ADMIN_URL: "http://127.0.0.1:4445",
+    CLIENT_SECRET: "production-client-secret",
+    SESSION_SECRET: "production-session-secret",
+    REDIRECT_URI: "https://app.example.com/callback",
+    SCOPES: "openid verusid",
+  }))
 
   assert.ok(localErrors.some((error) => error.includes("REDIRECT_URI")))
+  assert.ok(localErrors.some((error) => error.includes("HYDRA_PUBLIC_URL")))
   assert.ok(localErrors.some((error) => error.includes("CLIENT_SECRET")))
   assert.ok(localErrors.some((error) => error.includes("SESSION_SECRET")))
   assert.ok(localErrors.some((error) => error.includes("LOCAL_HOST")))
   assert.deepEqual(validErrors, [])
   assert.ok(publicAdminErrors.some((error) => error.includes("HYDRA_ADMIN_URL")))
+  assert.ok(malformedErrors.some((error) => error.includes("PORT")))
+  assert.ok(malformedErrors.some((error) => error.includes("OAUTH_HTTP_TIMEOUT_MS")))
+  assert.ok(malformedErrors.some((error) => error.includes("REDIRECT_URI")))
+  assert.ok(malformedErrors.some((error) => error.includes("HYDRA_PUBLIC_URL")))
+  assert.ok(malformedErrors.some((error) => error.includes("HYDRA_ADMIN_URL")))
+  assert.ok(insecureIssuerErrors.some((error) => error.includes("HYDRA_PUBLIC_URL")))
+  assert.ok(scopeErrors.some((error) => error.includes("SCOPES")))
 })
 
 test("state validation rejects missing and mismatched state", () => {
@@ -202,6 +241,7 @@ test("client completeLogin returns sanitized session unless raw tokens are reque
     })
     const raw = await client.completeLogin({
       code: "returned-code",
+      codeVerifier: loginRequest.codeVerifier,
       returnedState: "saved-state",
       expectedState: "saved-state",
       expectedNonce: "saved-nonce",
@@ -219,6 +259,130 @@ test("client completeLogin returns sanitized session unless raw tokens are reque
   }
 })
 
+test("client completeLogin requires saved PKCE verifier before token exchange", async () => {
+  const originalFetch = global.fetch
+  let tokenExchangeCalled = false
+  global.fetch = async () => {
+    tokenExchangeCalled = true
+    return textJsonResponse({})
+  }
+
+  try {
+    const client = createVerusOAuthClient(config)
+    await assert.rejects(
+      client.completeLogin({
+        code: "returned-code",
+        returnedState: "saved-state",
+        expectedState: "saved-state",
+        expectedNonce: "saved-nonce",
+      }),
+      (error) => {
+        assert.equal(error instanceof VerusOAuthError, true)
+        assert.equal(error.code, VerusOAuthErrorCode.MISSING_CODE_VERIFIER)
+        return true
+      },
+    )
+    assert.equal(tokenExchangeCalled, false)
+  } finally {
+    global.fetch = originalFetch
+  }
+})
+
+test("client completeLogin can use a custom access token verifier", async () => {
+  clearOidcCache()
+  const { token, accessToken, jwk } = createSignedIdToken({
+    nonce: "saved-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const fetchMock = installFetchMock({ token, accessToken, jwk })
+  const verifierCalls = []
+
+  try {
+    const client = createVerusOAuthClient({
+      ...config,
+      accessTokenVerifier: (input) => {
+        verifierCalls.push(input)
+        return { active: true, claims: verusClaims }
+      },
+    })
+    const session = await client.completeLogin({
+      code: "returned-code",
+      codeVerifier: "saved-code-verifier",
+      returnedState: "saved-state",
+      expectedState: "saved-state",
+      expectedNonce: "saved-nonce",
+    })
+
+    assert.equal(session.subject, "iUserAddress")
+    assert.equal(verifierCalls.length, 1)
+    assert.equal(verifierCalls[0].accessToken, "access-token-value")
+    assert.equal(verifierCalls[0].tokenSet.id_token, token)
+    assert.equal(verifierCalls[0].idTokenClaims.verus_id, "iUserAddress")
+    assert.equal(fetchMock.introspectionCalls, 0)
+  } finally {
+    global.fetch = fetchMock.originalFetch
+    clearOidcCache()
+  }
+})
+
+test("client completeLogin rejects inactive and mismatched custom verifier results", async () => {
+  clearOidcCache()
+  const { token, accessToken, jwk } = createSignedIdToken({
+    nonce: "saved-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const inactiveFetchMock = installFetchMock({ token, accessToken, jwk })
+
+  try {
+    const client = createVerusOAuthClient({
+      ...config,
+      accessTokenVerifier: () => ({ active: false, claims: verusClaims }),
+    })
+    await assert.rejects(
+      client.completeLogin({
+        code: "returned-code",
+        codeVerifier: "saved-code-verifier",
+        returnedState: "saved-state",
+        expectedState: "saved-state",
+        expectedNonce: "saved-nonce",
+      }),
+      (error) => {
+        assert.equal(error instanceof VerusOAuthError, true)
+        assert.equal(error.code, VerusOAuthErrorCode.ACCESS_TOKEN_INTROSPECTION_FAILED)
+        return true
+      },
+    )
+  } finally {
+    global.fetch = inactiveFetchMock.originalFetch
+    clearOidcCache()
+  }
+
+  const mismatchFetchMock = installFetchMock({ token, accessToken, jwk })
+  try {
+    const client = createVerusOAuthClient({
+      ...config,
+      accessTokenVerifier: () => ({ active: true, claims: { ...verusClaims, verus_id: "iDifferentAddress" } }),
+    })
+    await assert.rejects(
+      client.completeLogin({
+        code: "returned-code",
+        codeVerifier: "saved-code-verifier",
+        returnedState: "saved-state",
+        expectedState: "saved-state",
+        expectedNonce: "saved-nonce",
+      }),
+      (error) => {
+        assert.equal(error instanceof VerusOAuthError, true)
+        assert.equal(error.code, VerusOAuthErrorCode.VERUS_CLAIMS_MISMATCH)
+        return true
+      },
+    )
+  } finally {
+    global.fetch = mismatchFetchMock.originalFetch
+    clearOidcCache()
+  }
+})
+
 test("structured errors expose stable codes and redact token diagnostics", async () => {
   const originalFetch = global.fetch
   global.fetch = async () => textJsonResponse({
@@ -232,6 +396,7 @@ test("structured errors expose stable codes and redact token diagnostics", async
     await assert.rejects(
       client.completeLogin({
         code: "bad-code",
+        codeVerifier: "saved-code-verifier",
         returnedState: "saved-state",
         expectedState: "saved-state",
         expectedNonce: "saved-nonce",
@@ -431,6 +596,7 @@ function createSignedIdToken({ nonce, atHashAccessToken, expiresInSeconds = 300 
 function installFetchMock({ token, accessToken, jwk }) {
   const originalFetch = global.fetch
   const tokenBodies = []
+  let introspectionCalls = 0
   global.fetch = async (url, init) => {
     const value = String(url)
     if (value.endsWith("/oauth2/token")) {
@@ -454,6 +620,7 @@ function installFetchMock({ token, accessToken, jwk }) {
       return jsonResponse({ keys: [jwk] })
     }
     if (value.endsWith("/admin/oauth2/introspect")) {
+      introspectionCalls += 1
       return textJsonResponse({
         active: true,
         sub: "iUserAddress",
@@ -463,5 +630,11 @@ function installFetchMock({ token, accessToken, jwk }) {
     }
     throw new Error(`Unexpected fetch ${url}`)
   }
-  return { originalFetch, tokenBodies }
+  return {
+    originalFetch,
+    tokenBodies,
+    get introspectionCalls() {
+      return introspectionCalls
+    },
+  }
 }
