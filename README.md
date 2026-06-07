@@ -24,7 +24,11 @@ const verusOAuth = createVerusOAuthClient(config)
 
 app.get("/login", (req, res) => {
   const login = verusOAuth.createLoginRequest()
-  req.session.oauth = { state: login.state, nonce: login.nonce }
+  req.session.oauth = {
+    state: login.state,
+    nonce: login.nonce,
+    codeVerifier: login.codeVerifier,
+  }
   res.redirect(login.authorizationUrl.toString())
 })
 
@@ -35,6 +39,7 @@ app.get("/callback", async (req, res, next) => {
 
     req.session.login = await verusOAuth.completeLogin({
       code: req.query.code,
+      codeVerifier: saved.codeVerifier,
       returnedState: req.query.state,
       expectedState: saved.state,
       expectedNonce: saved.nonce,
@@ -69,6 +74,15 @@ app.get("/callback", async (req, res, next) => {
 ```
 
 Raw OAuth tokens are returned only when `includeRawTokens: true` is passed to `completeLogin()`.
+SDK-created login requests use PKCE by default. Store `codeVerifier` in the
+user session with `state` and `nonce`, then pass it to `completeLogin()`.
+
+## Production Guard
+
+Call `assertProductionConfig(config)` during production startup, or use
+`getProductionConfigErrors(config)` if you need to render/report all failures.
+The guard rejects local example secrets, HTTP redirect URIs, public-looking HTTP
+Hydra admin URLs, and starter-only local host defaults.
 
 ## Environment
 

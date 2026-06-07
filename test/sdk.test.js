@@ -11,6 +11,7 @@ import {
   createVerusOAuthClient,
   extractVerusClaims,
   getConfigWarnings,
+  getProductionConfigErrors,
   toPublicSession,
   validateState,
   VerusOAuthError,
@@ -54,9 +55,15 @@ test("client factory creates authorization URL with state and nonce", () => {
 
   assert.ok(loginRequest.state)
   assert.ok(loginRequest.nonce)
+  assert.ok(loginRequest.codeVerifier)
   assert.equal(loginRequest.authorizationUrl.searchParams.get("scope"), "openid offline verusid")
   assert.equal(loginRequest.authorizationUrl.searchParams.get("state"), loginRequest.state)
   assert.equal(loginRequest.authorizationUrl.searchParams.get("nonce"), loginRequest.nonce)
+  assert.equal(loginRequest.authorizationUrl.searchParams.get("code_challenge_method"), "S256")
+  assert.equal(
+    loginRequest.authorizationUrl.searchParams.get("code_challenge"),
+    crypto.createHash("sha256").update(loginRequest.codeVerifier).digest("base64url"),
+  )
 })
 
 test("config warnings distinguish LAN placeholder from compatibility default", () => {
@@ -72,6 +79,32 @@ test("config warnings distinguish LAN placeholder from compatibility default", (
   assert.ok(compatibilityWarnings.some((warning) => warning.includes("compatibility default")))
   assert.equal(explicitLanWarnings.length, 0)
   assert.equal(createConfig().localHost, "192.168.0.160")
+})
+
+test("production config errors reject local and public HTTP settings", () => {
+  const localErrors = getProductionConfigErrors(createConfig())
+  const validErrors = getProductionConfigErrors(createConfig({
+    LOCAL_HOST: "app.example.com",
+    HYDRA_PUBLIC_URL: "https://hydra.example.com",
+    HYDRA_ADMIN_URL: "http://127.0.0.1:4445",
+    CLIENT_SECRET: "production-client-secret",
+    SESSION_SECRET: "production-session-secret",
+    REDIRECT_URI: "https://app.example.com/callback",
+  }))
+  const publicAdminErrors = getProductionConfigErrors(createConfig({
+    LOCAL_HOST: "app.example.com",
+    HYDRA_ADMIN_URL: "http://hydra-admin.example.com:4445",
+    CLIENT_SECRET: "production-client-secret",
+    SESSION_SECRET: "production-session-secret",
+    REDIRECT_URI: "https://app.example.com/callback",
+  }))
+
+  assert.ok(localErrors.some((error) => error.includes("REDIRECT_URI")))
+  assert.ok(localErrors.some((error) => error.includes("CLIENT_SECRET")))
+  assert.ok(localErrors.some((error) => error.includes("SESSION_SECRET")))
+  assert.ok(localErrors.some((error) => error.includes("LOCAL_HOST")))
+  assert.deepEqual(validErrors, [])
+  assert.ok(publicAdminErrors.some((error) => error.includes("HYDRA_ADMIN_URL")))
 })
 
 test("state validation rejects missing and mismatched state", () => {
@@ -154,12 +187,15 @@ test("client completeLogin returns sanitized session unless raw tokens are reque
     nonce: "saved-nonce",
     atHashAccessToken: "access-token-value",
   })
-  const originalFetch = installFetchMock({ token, accessToken, jwk })
+  const fetchMock = installFetchMock({ token, accessToken, jwk })
+  const originalFetch = fetchMock.originalFetch
 
   try {
     const client = createVerusOAuthClient(config)
+    const loginRequest = client.createLoginRequest()
     const sanitized = await client.completeLogin({
       code: "returned-code",
+      codeVerifier: loginRequest.codeVerifier,
       returnedState: "saved-state",
       expectedState: "saved-state",
       expectedNonce: "saved-nonce",
@@ -172,6 +208,7 @@ test("client completeLogin returns sanitized session unless raw tokens are reque
       includeRawTokens: true,
     })
 
+    assert.equal(fetchMock.tokenBodies[0].get("code_verifier"), loginRequest.codeVerifier)
     assert.equal(sanitized.tokens, undefined)
     assert.equal(sanitized.subject, "iUserAddress")
     assert.equal(raw.tokens.access_token, "access-token-value")
@@ -297,6 +334,45 @@ test("OIDC discovery and JWKS are cached per issuer", async () => {
   }
 })
 
+test("OIDC discovery and JWKS caches refresh after TTL", async () => {
+  clearOidcCache()
+  const { token, accessToken, jwk } = createSignedIdToken({
+    nonce: "expected-nonce",
+    atHashAccessToken: "access-token-value",
+    expiresInSeconds: 900,
+  })
+  const calls = { discovery: 0, jwks: 0 }
+  const originalFetch = global.fetch
+  const originalDateNow = Date.now
+  let now = originalDateNow()
+  Date.now = () => now
+  global.fetch = async (url) => {
+    if (String(url).endsWith("/.well-known/openid-configuration")) {
+      calls.discovery += 1
+      return jsonResponse({
+        issuer: "http://192.168.0.160:4444",
+        jwks_uri: "http://192.168.0.160:4444/.well-known/jwks.json",
+      })
+    }
+    if (String(url).endsWith("/.well-known/jwks.json")) {
+      calls.jwks += 1
+      return jsonResponse({ keys: [jwk] })
+    }
+    throw new Error(`Unexpected fetch ${url}`)
+  }
+
+  try {
+    assert.equal((await verifyIdToken(config, token, accessToken, "expected-nonce")).verified, true)
+    now += 5 * 60 * 1000 + 1
+    assert.equal((await verifyIdToken(config, token, accessToken, "expected-nonce")).verified, true)
+    assert.deepEqual(calls, { discovery: 2, jwks: 2 })
+  } finally {
+    global.fetch = originalFetch
+    Date.now = originalDateNow
+    clearOidcCache()
+  }
+})
+
 function signJwt(privateKey, header, claims) {
   const encodedHeader = Buffer.from(JSON.stringify(header)).toString("base64url")
   const encodedClaims = Buffer.from(JSON.stringify(claims)).toString("base64url")
@@ -324,7 +400,7 @@ function textJsonResponse(body, ok = true, status = 200) {
   }
 }
 
-function createSignedIdToken({ nonce, atHashAccessToken }) {
+function createSignedIdToken({ nonce, atHashAccessToken, expiresInSeconds = 300 }) {
   const { privateKey, publicKey } = crypto.generateKeyPairSync("rsa", {
     modulusLength: 2048,
   })
@@ -345,7 +421,7 @@ function createSignedIdToken({ nonce, atHashAccessToken }) {
       aud: "verus-express-login",
       sub: "iUserAddress",
       nonce,
-      exp: Math.floor(Date.now() / 1000) + 300,
+      exp: Math.floor(Date.now() / 1000) + expiresInSeconds,
       at_hash: computeAtHash(atHashAccessToken, "RS256"),
       ...verusClaims,
     }),
@@ -354,9 +430,11 @@ function createSignedIdToken({ nonce, atHashAccessToken }) {
 
 function installFetchMock({ token, accessToken, jwk }) {
   const originalFetch = global.fetch
-  global.fetch = async (url) => {
+  const tokenBodies = []
+  global.fetch = async (url, init) => {
     const value = String(url)
     if (value.endsWith("/oauth2/token")) {
+      tokenBodies.push(init.body)
       return textJsonResponse({
         access_token: accessToken,
         id_token: token,
@@ -385,5 +463,5 @@ function installFetchMock({ token, accessToken, jwk }) {
     }
     throw new Error(`Unexpected fetch ${url}`)
   }
-  return originalFetch
+  return { originalFetch, tokenBodies }
 }

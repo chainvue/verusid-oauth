@@ -34,5 +34,8 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Pack dry run
+        run: npm pack --dry-run
+
       - name: Publish
         run: npm publish --access public --provenance

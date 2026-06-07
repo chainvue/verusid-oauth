@@ -5,9 +5,15 @@ export const LOCAL_HOST_PLACEHOLDER = "<LAN-IP>"
 export const COMPAT_LOCAL_HOST = "192.168.0.160"
 export const DEFAULT_LOCAL_HOST = COMPAT_LOCAL_HOST
 const DEFAULT_TIMEOUT_MS = 10000
+const OIDC_CACHE_TTL_MS = 5 * 60 * 1000
 
-const discoveryCache = new Map<string, Promise<OidcDiscovery>>()
-const jwksCache = new Map<string, Promise<JsonWebKeySet>>()
+type CacheEntry<T> = {
+  expiresAt: number
+  value: Promise<T>
+}
+
+const discoveryCache = new Map<string, CacheEntry<OidcDiscovery>>()
+const jwksCache = new Map<string, CacheEntry<JsonWebKeySet>>()
 
 export const VERUS_CLAIM_NAMES = [
   "verus_id",
@@ -43,10 +49,18 @@ export type VerusOAuthConfig = {
 
 export type CompleteLoginOptions = {
   code?: unknown
+  codeVerifier?: unknown
   returnedState?: unknown
   expectedState?: unknown
   expectedNonce?: unknown
   includeRawTokens?: boolean
+}
+
+export type LoginRequest = {
+  authorizationUrl: URL
+  state: string
+  nonce: string
+  codeVerifier: string
 }
 
 export type PublicVerusSession = {
@@ -99,15 +113,15 @@ type TokenResult = {
   ok: boolean
   status?: number
   statusText?: string
-  body: Record<string, any>
+  body: JsonObject
   error?: unknown
 }
 
 type IdTokenVerification = {
   ok: boolean
   verified: boolean
-  claims: Record<string, any> | null
-  header?: Record<string, any> | null
+  claims: JwtClaims | null
+  header?: JwtHeader | null
   checks: Array<{ label: string; ok: boolean }>
   error?: string | null
   issuer?: string
@@ -116,8 +130,8 @@ type IdTokenVerification = {
 type IntrospectionResult = {
   body?: {
     active?: boolean
-    ext?: Record<string, any>
-    [key: string]: any
+    ext?: JsonObject
+    [key: string]: unknown
   }
 }
 
@@ -133,6 +147,22 @@ type JsonWebKeySet = {
 type VerusJsonWebKey = JsonWebKey & Record<string, unknown> & {
   kid?: string
   use?: string
+}
+
+type JsonObject = Record<string, unknown>
+
+type JwtHeader = JsonObject & {
+  alg?: string
+  kid?: string
+}
+
+type JwtClaims = JsonObject & {
+  iss?: string
+  aud?: string | string[]
+  sub?: string
+  nonce?: string
+  exp?: number
+  at_hash?: string
 }
 
 export function createConfig(env: Record<string, string | undefined> = process.env): VerusOAuthConfig {
@@ -166,6 +196,37 @@ export function getConfigWarnings(config: Pick<VerusOAuthConfig, "localHost" | "
   return warnings
 }
 
+export function getProductionConfigErrors(
+  config: Pick<VerusOAuthConfig, "redirectUri" | "hydraAdminUrl" | "clientSecret" | "sessionSecret" | "localHost">,
+): string[] {
+  const errors: string[] = []
+
+  if (isHttpUrl(config.redirectUri)) {
+    errors.push("Production REDIRECT_URI must use HTTPS.")
+  }
+  if (config.clientSecret === "verus-express-secret") {
+    errors.push("Production CLIENT_SECRET must not use the bundled local example secret.")
+  }
+  if (config.sessionSecret === "local-express-login-session-secret") {
+    errors.push("Production SESSION_SECRET must not use the bundled local example secret.")
+  }
+  if (isPublicHttpUrl(config.hydraAdminUrl)) {
+    errors.push("Production HYDRA_ADMIN_URL must not be a public-looking HTTP URL.")
+  }
+  if (config.localHost === LOCAL_HOST_PLACEHOLDER || config.localHost === COMPAT_LOCAL_HOST) {
+    errors.push("Production LOCAL_HOST must not use the starter local compatibility default.")
+  }
+
+  return errors
+}
+
+export function assertProductionConfig(config: VerusOAuthConfig): void {
+  const errors = getProductionConfigErrors(config)
+  if (errors.length > 0) {
+    throw new Error(`Invalid production VerusID OAuth config:\n${errors.map((error) => `- ${error}`).join("\n")}`)
+  }
+}
+
 export function createVerusOAuthClient(config: VerusOAuthConfig) {
   return new VerusOAuthClient(config)
 }
@@ -177,13 +238,15 @@ export class VerusOAuthClient {
     this.config = config
   }
 
-  createLoginRequest() {
+  createLoginRequest(): LoginRequest {
     const state = randomValue()
     const nonce = randomValue()
+    const codeVerifier = randomValue()
     return {
-      authorizationUrl: buildAuthorizationUrl(this.config, state, nonce),
+      authorizationUrl: buildAuthorizationUrl(this.config, state, nonce, codeVerifier),
       state,
       nonce,
+      codeVerifier,
     }
   }
 
@@ -192,6 +255,7 @@ export class VerusOAuthClient {
   ): Promise<PublicVerusSession | VerifiedVerusSession | null | undefined> {
     const {
       code,
+      codeVerifier,
       returnedState,
       expectedState,
       expectedNonce,
@@ -206,7 +270,7 @@ export class VerusOAuthClient {
       throw new VerusOAuthError(VerusOAuthErrorCode.MISSING_CODE, "Hydra did not return an authorization code.")
     }
 
-    const tokenResult = await exchangeCode(this.config, String(code))
+    const tokenResult = await exchangeCode(this.config, String(code), codeVerifier ? String(codeVerifier) : undefined)
     if (!tokenResult.ok) {
       throw new VerusOAuthError(
         VerusOAuthErrorCode.TOKEN_EXCHANGE_FAILED,
@@ -230,7 +294,7 @@ export class VerusOAuthClient {
     }
 
     const introspectionResult = tokenResult.body.access_token
-      ? await introspectAccessToken(this.config, tokenResult.body.access_token)
+      ? await introspectAccessToken(this.config, String(tokenResult.body.access_token))
       : null
     if (!introspectionResult?.body?.active) {
       throw new VerusOAuthError(
@@ -257,11 +321,16 @@ export class VerusOAuthClient {
   }
 }
 
-export function randomValue() {
+export function randomValue(): string {
   return crypto.randomBytes(24).toString("base64url")
 }
 
-export function buildAuthorizationUrl(config: VerusOAuthConfig, state: string, nonce: string) {
+export function buildAuthorizationUrl(
+  config: VerusOAuthConfig,
+  state: string,
+  nonce: string,
+  codeVerifier?: string,
+): URL {
   const authUrl = new URL("/oauth2/auth", config.hydraPublicUrl)
   authUrl.searchParams.set("client_id", config.clientId)
   authUrl.searchParams.set("response_type", "code")
@@ -269,12 +338,16 @@ export function buildAuthorizationUrl(config: VerusOAuthConfig, state: string, n
   authUrl.searchParams.set("redirect_uri", config.redirectUri)
   authUrl.searchParams.set("state", state)
   authUrl.searchParams.set("nonce", nonce)
+  if (codeVerifier) {
+    authUrl.searchParams.set("code_challenge", createPkceChallenge(codeVerifier))
+    authUrl.searchParams.set("code_challenge_method", "S256")
+  }
   return authUrl
 }
 
 export const createAuthorizationUrl = buildAuthorizationUrl
 
-export function validateState(expectedState: unknown, returnedState: unknown) {
+export function validateState(expectedState: unknown, returnedState: unknown): { ok: boolean; message: string } {
   if (!expectedState) {
     return { ok: false, message: "Missing saved state" }
   }
@@ -293,12 +366,15 @@ export function validateState(expectedState: unknown, returnedState: unknown) {
 
 export const validateOAuthState = validateState
 
-export async function exchangeCode(config: VerusOAuthConfig, code: string) {
+export async function exchangeCode(config: VerusOAuthConfig, code: string, codeVerifier?: string): Promise<TokenResult> {
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: config.redirectUri,
   })
+  if (codeVerifier) {
+    body.set("code_verifier", codeVerifier)
+  }
 
   return postForm(`${config.hydraPublicUrl}/oauth2/token`, body, {
     authorization: `Basic ${Buffer.from(`${config.clientId}:${config.clientSecret}`).toString("base64")}`,
@@ -307,7 +383,7 @@ export async function exchangeCode(config: VerusOAuthConfig, code: string) {
 
 export const exchangeCodeForTokens = exchangeCode
 
-export async function introspectAccessToken(config: VerusOAuthConfig, accessToken: string) {
+export async function introspectAccessToken(config: VerusOAuthConfig, accessToken: string): Promise<TokenResult> {
   return postForm(
     `${config.hydraAdminUrl}/admin/oauth2/introspect`,
     new URLSearchParams({ token: accessToken }),
@@ -398,17 +474,23 @@ export async function verifyIdToken(
 
 async function getDiscovery(config: VerusOAuthConfig) {
   const issuerUrl = config.hydraPublicUrl.replace(/\/+$/, "")
-  if (!discoveryCache.has(issuerUrl)) {
-    discoveryCache.set(issuerUrl, fetchJson(`${issuerUrl}/.well-known/openid-configuration`, config))
+  const cached = discoveryCache.get(issuerUrl)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value
   }
-  return discoveryCache.get(issuerUrl) as Promise<OidcDiscovery>
+  const value = fetchJson<OidcDiscovery>(`${issuerUrl}/.well-known/openid-configuration`, config)
+  discoveryCache.set(issuerUrl, { value, expiresAt: Date.now() + OIDC_CACHE_TTL_MS })
+  return value
 }
 
 async function getJwks(config: VerusOAuthConfig, jwksUri: string) {
-  if (!jwksCache.has(jwksUri)) {
-    jwksCache.set(jwksUri, fetchJson(jwksUri, config))
+  const cached = jwksCache.get(jwksUri)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.value
   }
-  return jwksCache.get(jwksUri) as Promise<JsonWebKeySet>
+  const value = fetchJson<JsonWebKeySet>(jwksUri, config)
+  jwksCache.set(jwksUri, { value, expiresAt: Date.now() + OIDC_CACHE_TTL_MS })
+  return value
 }
 
 export function clearOidcCache() {
@@ -450,13 +532,13 @@ function decodeJwt(token: unknown) {
     if (!claims || typeof claims !== "object" || Array.isArray(claims)) {
       return { ok: false as const, claims: null, header: null, error: "ID token payload is not a JSON object" }
     }
-    return { ok: true as const, claims: claims as Record<string, any>, header: header as Record<string, any>, error: null }
+    return { ok: true as const, claims: claims as JwtClaims, header: header as JwtHeader, error: null }
   } catch (error) {
     return { ok: false as const, claims: null, header: null, error: `Could not decode ID token: ${error instanceof Error ? error.message : String(error)}` }
   }
 }
 
-function findJwk(jwks: JsonWebKeySet, header: Record<string, any> | null) {
+function findJwk(jwks: JsonWebKeySet, header: JwtHeader | null) {
   return (jwks.keys || []).find((key) => {
     if (header?.kid && key.kid !== header.kid) {
       return false
@@ -465,7 +547,7 @@ function findJwk(jwks: JsonWebKeySet, header: Record<string, any> | null) {
   })
 }
 
-export function verifyJwtSignature(token: string, header: Record<string, any> | null, jwk: VerusJsonWebKey) {
+export function verifyJwtSignature(token: string, header: JwtHeader | null, jwk: VerusJsonWebKey): boolean {
   if (header?.alg !== "RS256") {
     return false
   }
@@ -477,7 +559,7 @@ export function verifyJwtSignature(token: string, header: Record<string, any> | 
   return verifier.verify(publicKey, Buffer.from(parts[2], "base64url"))
 }
 
-export function computeAtHash(accessToken: string, alg: string) {
+export function computeAtHash(accessToken: string, alg: unknown): string | null {
   if (alg !== "RS256") {
     return null
   }
@@ -485,7 +567,7 @@ export function computeAtHash(accessToken: string, alg: string) {
   return digest.subarray(0, digest.length / 2).toString("base64url")
 }
 
-function audienceIncludes(audience: unknown, expectedAudience: string) {
+function audienceIncludes(audience: unknown, expectedAudience: string): boolean {
   return Array.isArray(audience)
     ? audience.includes(expectedAudience)
     : audience === expectedAudience
@@ -509,7 +591,7 @@ export function extractVerusClaims(source: unknown): VerusClaims | null {
     : null
 }
 
-export function verusClaimsMatch(idClaims: VerusClaims | null, accessClaims: VerusClaims | null) {
+export function verusClaimsMatch(idClaims: VerusClaims | null, accessClaims: VerusClaims | null): boolean {
   if (!idClaims || !accessClaims) {
     return false
   }
@@ -555,12 +637,12 @@ export function buildVerifiedSession(
     ok: true,
     subject: idTokenVerification.claims?.sub || idClaims.verus_id,
     verus: idClaims,
-    grantedScope: tokenResult.body.scope || "",
+    grantedScope: stringValue(tokenResult.body.scope),
     refreshTokenPresent: Boolean(tokenResult.body.refresh_token),
     tokens: {
-      access_token: tokenResult.body.access_token,
-      id_token: tokenResult.body.id_token,
-      refresh_token: tokenResult.body.refresh_token,
+      access_token: optionalStringValue(tokenResult.body.access_token),
+      id_token: optionalStringValue(tokenResult.body.id_token),
+      refresh_token: optionalStringValue(tokenResult.body.refresh_token),
     },
   }
 }
@@ -569,7 +651,7 @@ export async function completeVerusLogin(config: VerusOAuthConfig, options: Comp
   return createVerusOAuthClient(config).completeLogin(options)
 }
 
-export function toPublicSession(session: VerifiedVerusSession | null | undefined) {
+export function toPublicSession(session: VerifiedVerusSession | null | undefined): PublicVerusSession | null | undefined {
   if (!session) {
     return session
   }
@@ -598,7 +680,40 @@ function redactDiagnostics(value: unknown): unknown {
   return redacted
 }
 
-function parseJson(value: string): Record<string, any> | null {
+function createPkceChallenge(codeVerifier: string): string {
+  return crypto.createHash("sha256").update(codeVerifier).digest("base64url")
+}
+
+function isHttpUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === "http:"
+  } catch {
+    return false
+  }
+}
+
+function isPublicHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === "http:" && !isLoopbackHost(url.hostname)
+  } catch {
+    return false
+  }
+}
+
+function isLoopbackHost(hostname: string): boolean {
+  return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1" || hostname === "[::1]"
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string" ? value : ""
+}
+
+function optionalStringValue(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined
+}
+
+function parseJson(value: string): JsonObject | null {
   try {
     return JSON.parse(value)
   } catch {
