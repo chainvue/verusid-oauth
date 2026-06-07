@@ -1,0 +1,36 @@
+{
+  "name": "@chainvue/verusid-oauth",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for server-side VerusID OAuth/OIDC login",
+  "license": "MIT",
+  "author": "Robert Lech",
+  "type": "module",
+  "private": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run build && node --test test/*.test.js",
+    "doctor:local": "node scripts/doctor-local.cjs"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.42",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
