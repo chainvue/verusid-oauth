@@ -80,32 +80,29 @@ Raw OAuth tokens are returned only when `includeRawTokens: true` is passed to `c
 - `SCOPES`, default `openid offline verusid`
 - `OAUTH_HTTP_TIMEOUT_MS`, default `10000`
 
-## Release
+## Release Checklist
 
-This package is intended to publish publicly as `@chainvue/verusid-oauth@0.1.0` from GitHub Actions with npm Trusted Publishing.
+Use this checklist for future releases. npm versions are immutable, so push the
+release tag only after the package version and release contents are final.
 
-Before tagging:
+1. Update the `package.json` version.
+2. Run `npm test`.
+3. Commit the release changes.
+4. Tag the commit as `vX.Y.Z`.
+5. Push the tag.
+6. Confirm GitHub Actions publishes the package.
+7. Verify the published version with:
 
 ```sh
-npm ci
-npm run typecheck
-npm test
-npm run build
-npm pack --dry-run
+npm view @chainvue/verusid-oauth version
 ```
 
-Configure npm Trusted Publishing for:
+npm Trusted Publishing must remain configured for package
+`@chainvue/verusid-oauth` with:
 
-- Package: `@chainvue/verusid-oauth`
 - GitHub repository: `chainvue/verusid-oauth`
-- Workflow: `.github/workflows/release.yml`
-
-Then push the release tag:
-
-```sh
-git tag v0.1.0
-git push origin main --tags
-```
+- Workflow: `release.yml`
+- Permission: npm publish
 
 ## License
 
