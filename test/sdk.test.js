@@ -200,6 +200,26 @@ test("verified session is sanitized and requires matching ID/access claims", () 
   assert.equal(mismatched.ok, false)
 })
 
+test("verified session rejects OIDC subject that does not match Verus ID", () => {
+  const tokenResult = {
+    ok: true,
+    body: {
+      scope: "openid offline verusid",
+      access_token: "access-token",
+      id_token: "id-token",
+      refresh_token: "refresh-token",
+    },
+  }
+  const verified = buildVerifiedSession(
+    tokenResult,
+    { verified: true, claims: { sub: "iDifferentSubject", ...verusClaims } },
+    { body: { active: true, ext: verusClaims } },
+  )
+
+  assert.equal(verified.ok, false)
+  assert.match(verified.error, /subject/)
+})
+
 test("toPublicSession never returns raw tokens", () => {
   const publicSession = toPublicSession({
     ok: true,
@@ -495,6 +515,31 @@ test("ID token verification checks signature, issuer, audience, nonce, expiry, a
   }
 })
 
+test("ID token verification reports invalid OIDC JSON responses", async () => {
+  clearOidcCache()
+  const { token, accessToken } = createSignedIdToken({
+    nonce: "expected-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const originalFetch = global.fetch
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    text: async () => "<html>not json</html>",
+  })
+
+  try {
+    const result = await verifyIdToken(config, token, accessToken, "expected-nonce")
+
+    assert.equal(result.verified, false)
+    assert.match(result.error, /Invalid JSON response/)
+  } finally {
+    global.fetch = originalFetch
+    clearOidcCache()
+  }
+})
+
 test("OIDC discovery and JWKS are cached per issuer", async () => {
   clearOidcCache()
   const { token, accessToken, jwk } = createSignedIdToken({
@@ -582,6 +627,7 @@ function jsonResponse(body) {
     status: 200,
     statusText: "OK",
     json: async () => body,
+    text: async () => JSON.stringify(body),
   }
 }
 

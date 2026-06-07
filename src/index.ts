@@ -593,7 +593,11 @@ async function fetchJson<T>(
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(config.timeoutMs || DEFAULT_TIMEOUT_MS),
   })
-  const body = await response.json() as T & { error?: string }
+  const text = await response.text()
+  const body = parseJson(text) as (T & { error?: string }) | null
+  if (!body) {
+    throw new Error(`Invalid JSON response from ${url}`)
+  }
   if (!response.ok) {
     throw new Error(body?.error || response.statusText)
   }
@@ -709,11 +713,15 @@ export function buildVerifiedSession(
   const idClaims = extractVerusClaims(idTokenVerification.claims)
   const accessClaims = extractVerusClaims(introspectionResult?.body?.ext)
   const claimsMatch = verusClaimsMatch(idClaims, accessClaims)
+  const subject = optionalStringValue(idTokenVerification.claims?.sub)
+  const subjectMatches = !subject || !idClaims || subject === idClaims.verus_id
 
-  if (!tokenResult.ok || !idTokenVerification.verified || !introspectionResult?.body?.active || !claimsMatch || !idClaims) {
+  if (!tokenResult.ok || !idTokenVerification.verified || !introspectionResult?.body?.active || !claimsMatch || !idClaims || !subjectMatches) {
     return {
       ok: false,
-      error: "OAuth response did not pass VerusID verification",
+      error: subjectMatches
+        ? "OAuth response did not pass VerusID verification"
+        : "OIDC subject does not match the verified VerusID claim",
       idClaims,
       accessClaims,
       claimsMatch,
@@ -722,7 +730,7 @@ export function buildVerifiedSession(
 
   return {
     ok: true,
-    subject: idTokenVerification.claims?.sub || idClaims.verus_id,
+    subject: subject || idClaims.verus_id,
     verus: idClaims,
     grantedScope: stringValue(tokenResult.body.scope),
     refreshTokenPresent: Boolean(tokenResult.body.refresh_token),

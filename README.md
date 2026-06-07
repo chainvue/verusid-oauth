@@ -15,11 +15,15 @@ npm install @chainvue/verusid-oauth
 ```ts
 import {
   VerusOAuthError,
+  assertProductionConfig,
   createConfig,
   createVerusOAuthClient,
 } from "@chainvue/verusid-oauth"
 
 const config = createConfig(process.env)
+if (process.env.NODE_ENV === "production") {
+  assertProductionConfig(config)
+}
 const verusOAuth = createVerusOAuthClient(config)
 
 app.get("/login", (req, res) => {
