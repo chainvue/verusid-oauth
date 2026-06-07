@@ -200,6 +200,26 @@ test("verified session is sanitized and requires matching ID/access claims", () 
   assert.equal(mismatched.ok, false)
 })
 
+test("verified session rejects OIDC subject that does not match Verus ID", () => {
+  const tokenResult = {
+    ok: true,
+    body: {
+      scope: "openid offline verusid",
+      access_token: "access-token",
+      id_token: "id-token",
+      refresh_token: "refresh-token",
+    },
+  }
+  const verified = buildVerifiedSession(
+    tokenResult,
+    { verified: true, claims: { sub: "iDifferentSubject", ...verusClaims } },
+    { body: { active: true, ext: verusClaims } },
+  )
+
+  assert.equal(verified.ok, false)
+  assert.match(verified.error, /subject/)
+})
+
 test("toPublicSession never returns raw tokens", () => {
   const publicSession = toPublicSession({
     ok: true,
