@@ -515,6 +515,31 @@ test("ID token verification checks signature, issuer, audience, nonce, expiry, a
   }
 })
 
+test("ID token verification reports invalid OIDC JSON responses", async () => {
+  clearOidcCache()
+  const { token, accessToken } = createSignedIdToken({
+    nonce: "expected-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const originalFetch = global.fetch
+  global.fetch = async () => ({
+    ok: true,
+    status: 200,
+    statusText: "OK",
+    text: async () => "<html>not json</html>",
+  })
+
+  try {
+    const result = await verifyIdToken(config, token, accessToken, "expected-nonce")
+
+    assert.equal(result.verified, false)
+    assert.match(result.error, /Invalid JSON response/)
+  } finally {
+    global.fetch = originalFetch
+    clearOidcCache()
+  }
+})
+
 test("OIDC discovery and JWKS are cached per issuer", async () => {
   clearOidcCache()
   const { token, accessToken, jwk } = createSignedIdToken({
@@ -602,6 +627,7 @@ function jsonResponse(body) {
     status: 200,
     statusText: "OK",
     json: async () => body,
+    text: async () => JSON.stringify(body),
   }
 }
 
