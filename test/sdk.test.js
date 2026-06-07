@@ -10,6 +10,7 @@ import {
   createConfig,
   createVerusOAuthClient,
   extractVerusClaims,
+  getConfigWarnings,
   toPublicSession,
   validateState,
   VerusOAuthError,
@@ -56,6 +57,21 @@ test("client factory creates authorization URL with state and nonce", () => {
   assert.equal(loginRequest.authorizationUrl.searchParams.get("scope"), "openid offline verusid")
   assert.equal(loginRequest.authorizationUrl.searchParams.get("state"), loginRequest.state)
   assert.equal(loginRequest.authorizationUrl.searchParams.get("nonce"), loginRequest.nonce)
+})
+
+test("config warnings distinguish LAN placeholder from compatibility default", () => {
+  const placeholderWarnings = getConfigWarnings(createConfig({
+    LOCAL_HOST: "<LAN-IP>",
+  }))
+  const compatibilityWarnings = getConfigWarnings(createConfig())
+  const explicitLanWarnings = getConfigWarnings(createConfig({
+    LOCAL_HOST: "192.168.1.25",
+  }))
+
+  assert.ok(placeholderWarnings.some((warning) => warning.includes("<LAN-IP>")))
+  assert.ok(compatibilityWarnings.some((warning) => warning.includes("compatibility default")))
+  assert.equal(explicitLanWarnings.length, 0)
+  assert.equal(createConfig().localHost, "192.168.0.160")
 })
 
 test("state validation rejects missing and mismatched state", () => {

@@ -1,7 +1,9 @@
 import crypto from "node:crypto"
 
 export const DEFAULT_SCOPE = "openid offline verusid"
-const DEFAULT_LOCAL_HOST = "192.168.0.160"
+export const LOCAL_HOST_PLACEHOLDER = "<LAN-IP>"
+export const COMPAT_LOCAL_HOST = "192.168.0.160"
+export const DEFAULT_LOCAL_HOST = COMPAT_LOCAL_HOST
 const DEFAULT_TIMEOUT_MS = 10000
 
 const discoveryCache = new Map<string, Promise<OidcDiscovery>>()
@@ -150,6 +152,18 @@ export function createConfig(env: Record<string, string | undefined> = process.e
     showDebugTokens: env.SHOW_DEBUG_TOKENS === "1",
     timeoutMs: Number(env.OAUTH_HTTP_TIMEOUT_MS || DEFAULT_TIMEOUT_MS),
   }
+}
+
+export function getConfigWarnings(config: Pick<VerusOAuthConfig, "localHost" | "redirectUri">) {
+  const warnings: string[] = []
+
+  if (config.localHost === LOCAL_HOST_PLACEHOLDER || String(config.redirectUri).includes(LOCAL_HOST_PLACEHOLDER)) {
+    warnings.push("Replace <LAN-IP> with a LAN-reachable LOCAL_HOST before phone testing.")
+  } else if (config.localHost === COMPAT_LOCAL_HOST || String(config.redirectUri).includes(COMPAT_LOCAL_HOST)) {
+    warnings.push("LOCAL_HOST is using the bundled compatibility default; set LOCAL_HOST explicitly to your current LAN IP for phone testing.")
+  }
+
+  return warnings
 }
 
 export function createVerusOAuthClient(config: VerusOAuthConfig) {
