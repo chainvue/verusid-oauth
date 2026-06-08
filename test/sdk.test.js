@@ -437,6 +437,34 @@ test("client completeLogin normalizes custom verifier failures", async () => {
     global.fetch = fetchMock.originalFetch
     clearOidcCache()
   }
+
+  const rejectFetchMock = installFetchMock({ token, accessToken, jwk })
+  try {
+    const client = createVerusOAuthClient({
+      ...config,
+      accessTokenVerifier: async () => {
+        throw new Error("async verifier failed with secret-refresh-token")
+      },
+    })
+    await assert.rejects(
+      client.completeLogin({
+        code: "returned-code",
+        codeVerifier: "saved-code-verifier",
+        returnedState: "saved-state",
+        expectedState: "saved-state",
+        expectedNonce: "saved-nonce",
+      }),
+      (error) => {
+        assert.equal(error instanceof VerusOAuthError, true)
+        assert.equal(error.code, VerusOAuthErrorCode.ACCESS_TOKEN_INTROSPECTION_FAILED)
+        assert.doesNotMatch(JSON.stringify(error.diagnostics), /secret-refresh-token/)
+        return true
+      },
+    )
+  } finally {
+    global.fetch = rejectFetchMock.originalFetch
+    clearOidcCache()
+  }
 })
 
 test("structured errors expose stable codes and redact token diagnostics", async () => {
