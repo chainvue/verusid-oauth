@@ -676,6 +676,86 @@ test("OIDC discovery and JWKS caches refresh after TTL", async () => {
   }
 })
 
+test("OIDC discovery cache evicts failed fetches", async () => {
+  clearOidcCache()
+  const { token, accessToken, jwk } = createSignedIdToken({
+    nonce: "expected-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const calls = { discovery: 0, jwks: 0 }
+  const originalFetch = global.fetch
+  global.fetch = async (url) => {
+    if (String(url).endsWith("/.well-known/openid-configuration")) {
+      calls.discovery += 1
+      if (calls.discovery === 1) {
+        throw new Error("temporary discovery outage")
+      }
+      return jsonResponse({
+        issuer: "http://192.168.0.160:4444",
+        jwks_uri: "http://192.168.0.160:4444/.well-known/jwks.json",
+      })
+    }
+    if (String(url).endsWith("/.well-known/jwks.json")) {
+      calls.jwks += 1
+      return jsonResponse({ keys: [jwk] })
+    }
+    throw new Error(`Unexpected fetch ${url}`)
+  }
+
+  try {
+    const failed = await verifyIdToken(config, token, accessToken, "expected-nonce")
+    const recovered = await verifyIdToken(config, token, accessToken, "expected-nonce")
+
+    assert.equal(failed.verified, false)
+    assert.match(failed.error, /temporary discovery outage/)
+    assert.equal(recovered.verified, true)
+    assert.deepEqual(calls, { discovery: 2, jwks: 1 })
+  } finally {
+    global.fetch = originalFetch
+    clearOidcCache()
+  }
+})
+
+test("JWKS cache evicts failed fetches", async () => {
+  clearOidcCache()
+  const { token, accessToken, jwk } = createSignedIdToken({
+    nonce: "expected-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const calls = { discovery: 0, jwks: 0 }
+  const originalFetch = global.fetch
+  global.fetch = async (url) => {
+    if (String(url).endsWith("/.well-known/openid-configuration")) {
+      calls.discovery += 1
+      return jsonResponse({
+        issuer: "http://192.168.0.160:4444",
+        jwks_uri: "http://192.168.0.160:4444/.well-known/jwks.json",
+      })
+    }
+    if (String(url).endsWith("/.well-known/jwks.json")) {
+      calls.jwks += 1
+      if (calls.jwks === 1) {
+        throw new Error("temporary jwks outage")
+      }
+      return jsonResponse({ keys: [jwk] })
+    }
+    throw new Error(`Unexpected fetch ${url}`)
+  }
+
+  try {
+    const failed = await verifyIdToken(config, token, accessToken, "expected-nonce")
+    const recovered = await verifyIdToken(config, token, accessToken, "expected-nonce")
+
+    assert.equal(failed.verified, false)
+    assert.match(failed.error, /temporary jwks outage/)
+    assert.equal(recovered.verified, true)
+    assert.deepEqual(calls, { discovery: 1, jwks: 2 })
+  } finally {
+    global.fetch = originalFetch
+    clearOidcCache()
+  }
+})
+
 function signJwt(privateKey, header, claims) {
   const encodedHeader = Buffer.from(JSON.stringify(header)).toString("base64url")
   const encodedClaims = Buffer.from(JSON.stringify(claims)).toString("base64url")

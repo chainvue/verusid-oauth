@@ -575,6 +575,10 @@ async function getDiscovery(config: VerusOAuthConfig) {
     return cached.value
   }
   const value = fetchJson<OidcDiscovery>(`${issuerUrl}/.well-known/openid-configuration`, config)
+    .catch((error) => {
+      discoveryCache.delete(issuerUrl)
+      throw error
+    })
   discoveryCache.set(issuerUrl, { value, expiresAt: Date.now() + OIDC_CACHE_TTL_MS })
   return value
 }
@@ -585,6 +589,10 @@ async function getJwks(config: VerusOAuthConfig, jwksUri: string) {
     return cached.value
   }
   const value = fetchJson<JsonWebKeySet>(jwksUri, config)
+    .catch((error) => {
+      jwksCache.delete(jwksUri)
+      throw error
+    })
   jwksCache.set(jwksUri, { value, expiresAt: Date.now() + OIDC_CACHE_TTL_MS })
   return value
 }
