@@ -403,6 +403,42 @@ test("client completeLogin rejects inactive and mismatched custom verifier resul
   }
 })
 
+test("client completeLogin normalizes custom verifier failures", async () => {
+  clearOidcCache()
+  const { token, accessToken, jwk } = createSignedIdToken({
+    nonce: "saved-nonce",
+    atHashAccessToken: "access-token-value",
+  })
+  const fetchMock = installFetchMock({ token, accessToken, jwk })
+
+  try {
+    const client = createVerusOAuthClient({
+      ...config,
+      accessTokenVerifier: () => {
+        throw new Error("verifier failed with secret-access-token")
+      },
+    })
+    await assert.rejects(
+      client.completeLogin({
+        code: "returned-code",
+        codeVerifier: "saved-code-verifier",
+        returnedState: "saved-state",
+        expectedState: "saved-state",
+        expectedNonce: "saved-nonce",
+      }),
+      (error) => {
+        assert.equal(error instanceof VerusOAuthError, true)
+        assert.equal(error.code, VerusOAuthErrorCode.ACCESS_TOKEN_INTROSPECTION_FAILED)
+        assert.doesNotMatch(JSON.stringify(error.diagnostics), /secret-access-token/)
+        return true
+      },
+    )
+  } finally {
+    global.fetch = fetchMock.originalFetch
+    clearOidcCache()
+  }
+})
+
 test("structured errors expose stable codes and redact token diagnostics", async () => {
   const originalFetch = global.fetch
   global.fetch = async () => textJsonResponse({

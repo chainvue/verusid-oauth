@@ -338,7 +338,16 @@ export class VerusOAuthClient {
       )
     }
 
-    const introspectionResult = await verifyAccessToken(this.config, tokenResult.body, idTokenVerification.claims)
+    let introspectionResult: IntrospectionResult | null
+    try {
+      introspectionResult = await verifyAccessToken(this.config, tokenResult.body, idTokenVerification.claims)
+    } catch (error) {
+      throw new VerusOAuthError(
+        VerusOAuthErrorCode.ACCESS_TOKEN_INTROSPECTION_FAILED,
+        "Access token verification failed.",
+        { error },
+      )
+    }
     if (!introspectionResult?.body?.active) {
       throw new VerusOAuthError(
         VerusOAuthErrorCode.ACCESS_TOKEN_INTROSPECTION_FAILED,
