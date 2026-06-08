@@ -36,6 +36,13 @@ jobs:
 
       - name: Pack dry run
         run: npm pack --dry-run
-
+        
+      - name: Debug npm auth mode
+        run: |
+          node -v
+          npm -v
+          npm config get registry
+          npm whoami || true
+          
       - name: Publish
         run: npm publish --access public --provenance
