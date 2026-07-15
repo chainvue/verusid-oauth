@@ -1,41 +1,121 @@
+# Release — automated via semantic-release (Conventional Commits).
+#
+# Zero-touch: every push to `main` runs semantic-release; a releasable change
+# (feat -> minor, fix/perf -> patch; a BREAKING change stays 0.x -> minor per
+# .releaserc.json releaseRules) computes the next version, updates package.json
+# + CHANGELOG.md, publishes, tags, and creates the GitHub release. No releasable
+# commits -> no-op. Preview with the workflow_dispatch dry-run.
+#
+# Publish: semantic-release owns versioning only; the actual publish is the OIDC
+# `npm publish` (exec plugin) — @semantic-release/npm runs npmPublish:false so no
+# NPM token is needed; provenance + trusted publishing come from id-token:write.
+# npm is upgraded to the OIDC floor (>= 11.5.1; setup-node ships 10.x).
+#
+# Baseline: tags v0.1.0..v0.1.4 already exist, so version computation continues
+# from v0.1.4 (no 1.0.0 jump). The trusted-publisher registration (package
+# @chainvue/verusid-oauth, repo chainvue/verusid-oauth, workflow release.yml)
+# must stay pointed at THIS filename.
+#
+# Security: the release job holds id-token:write (publish rights); its actions are
+# SHA-pinned. `main` must let GITHUB_TOKEN push the release commit + tag.
 name: Release
 
 on:
   push:
-    tags:
-      - v*
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Dry run: compute the next version + notes, but do not publish or tag"
+        type: boolean
+        default: false
 
-permissions:
-  contents: read
-  id-token: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write # semantic-release pushes the release commit + tag
+      id-token: write # OIDC token for npm trusted publishing (provenance)
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
-          node-version: 20
+          fetch-depth: 0 # full history + tags: semantic-release needs them
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
           registry-url: https://registry.npmjs.org
 
-      - name: Install dependencies
+      - name: Upgrade npm to the OIDC trusted-publishing floor
+        run: npm install -g npm@^11.5.1
+
+      - name: Install
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
+      - name: Check (lint + typecheck + test + build)
+        run: npm run check
 
-      - name: Test
-        run: npm test
+      - name: Release
+        run: >-
+          npx semantic-release
+          ${{ (github.event_name == 'workflow_dispatch' && inputs.dry_run) && '--dry-run' || '' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"
 
-      - name: Build
-        run: npm run build
+  smoke:
+    needs: release
+    if: ${{ github.event_name == 'push' || !inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
 
-      - name: Pack dry run
-        run: npm pack --dry-run
+      # Validate whatever is currently latest on the registry (the new version if
+      # this run published; the existing latest on a no-op — a harmless recheck).
+      - name: Resolve latest published version
+        id: v
+        run: echo "version=$(npm view @chainvue/verusid-oauth version)" >> "$GITHUB_OUTPUT"
 
-      - name: Publish
-        run: npm publish --access public --provenance
+      - name: Wait for the registry to serve it
+        run: |
+          for i in $(seq 1 30); do
+            if npm view "@chainvue/verusid-oauth@${{ steps.v.outputs.version }}" version >/dev/null 2>&1; then
+              echo "available"; exit 0
+            fi
+            echo "waiting ($i)"; sleep 5
+          done
+          echo "version never appeared on registry"; exit 1
+
+      - name: Install from registry into a fresh project (plain-node ESM consumer probe)
+        run: |
+          mkdir -p /tmp/smoke && cd /tmp/smoke
+          npm init -y >/dev/null
+          npm pkg set type=module >/dev/null
+          npm install "@chainvue/verusid-oauth@${{ steps.v.outputs.version }}"
+
+      - name: Import the published package and assert the PKCE fix shipped
+        run: |
+          cd /tmp/smoke
+          cat > smoke.mjs <<'EOF'
+          import { randomValue } from "@chainvue/verusid-oauth";
+          const v = randomValue();
+          // RFC 7636 §4.1: code_verifier must be 43-128 chars (the shipped fix).
+          if (typeof v !== "string" || v.length < 43 || v.length > 128) {
+            throw new Error(`bad code_verifier length: ${v?.length}`);
+          }
+          console.log("smoke ok: verifier length", v.length);
+          EOF
+          node smoke.mjs
