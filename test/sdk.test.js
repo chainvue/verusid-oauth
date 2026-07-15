@@ -57,6 +57,13 @@ test("client factory creates authorization URL with state and nonce", () => {
   assert.ok(loginRequest.state)
   assert.ok(loginRequest.nonce)
   assert.ok(loginRequest.codeVerifier)
+  // RFC 7636 §4.1: code_verifier must be 43–128 chars, else compliant servers
+  // (Ory Hydra) reject the token exchange. Regression guard for the randomBytes(24)
+  // bug that emitted a 32-char verifier.
+  assert.ok(
+    loginRequest.codeVerifier.length >= 43 && loginRequest.codeVerifier.length <= 128,
+    `code_verifier length ${loginRequest.codeVerifier.length} out of RFC 7636 range 43-128`,
+  )
   assert.equal(loginRequest.authorizationUrl.searchParams.get("scope"), "openid offline verusid")
   assert.equal(loginRequest.authorizationUrl.searchParams.get("state"), loginRequest.state)
   assert.equal(loginRequest.authorizationUrl.searchParams.get("nonce"), loginRequest.nonce)
