@@ -374,7 +374,10 @@ export class VerusOAuthClient {
 }
 
 export function randomValue(): string {
-  return crypto.randomBytes(24).toString("base64url")
+  // 32 bytes → 43-char base64url. This also seeds the PKCE code_verifier, which
+  // RFC 7636 requires to be 43–128 chars; 24 bytes (32 chars) is below the floor
+  // and RFC-compliant servers (e.g. Ory Hydra) reject the token exchange.
+  return crypto.randomBytes(32).toString("base64url")
 }
 
 export function buildAuthorizationUrl(
