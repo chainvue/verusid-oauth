@@ -50,7 +50,7 @@ jobs:
 
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 22
+          node-version: 24
           cache: npm
           registry-url: https://registry.npmjs.org
 
@@ -81,7 +81,7 @@ jobs:
     steps:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
-          node-version: 22
+          node-version: 24
 
       # Validate whatever is currently latest on the registry (the new version if
       # this run published; the existing latest on a no-op — a harmless recheck).
