@@ -1,0 +1,55 @@
+# Dependabot for @chainvue/verusid-oauth.
+#
+# Ecosystems found in the repo: npm (package.json + package-lock.json) and
+# github-actions (ci.yml, release.yml). The package has no runtime
+# dependencies — everything here is build and lint tooling.
+#
+# Commit-message prefixes follow the repo's semantic-release setup (angular
+# preset), as in chainvue/verus-rpc: dev deps -> chore(deps-dev) -> no release.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci
+      include: scope
+
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: fix
+      prefix-development: chore
+      include: scope
+    groups:
+      # eslint, typescript-eslint and the config packages are bound by peer
+      # ranges, and typescript rides along so the compiler and the parser that
+      # has to understand it land in the same PR. The reason for grouping at
+      # all: in peculium-wallet a split bump (vitest without
+      # @vitest/coverage-v8) left a peer mismatch that broke CI.
+      eslint:
+        patterns:
+          - eslint
+          - "@eslint/*"
+          - typescript-eslint
+          - "@typescript-eslint/*"
+          - globals
+          - typescript
+      # semantic-release plugins are pinned to the core's plugin API.
+      semantic-release:
+        patterns:
+          - semantic-release
+          - "@semantic-release/*"
+      dev-dependencies:
+        dependency-type: development
+        update-types: ["minor", "patch"]
+    ignore:
+      # Same gate as chainvue/verus-rpc: TypeScript majors are held back by
+      # typescript-eslint's peer range (`>=4.8.4 <6.1.0` as of 8.6x), so a TS 7
+      # bump would fail `npm run lint` and the PR could never go green.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
